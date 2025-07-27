@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "813756731620",
+    "project_id": "taskdaily-77b75",
+    "storage_bucket": "taskdaily-77b75.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:813756731620:android:5aa0a985679b1b2c3a9cf1",
+        "android_client_info": {
+          "package_name": "com.transbuzz.newapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "813756731620-mpgegh0h0164n9sh00bd92285qik588t.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.transbuzz.newapp",
+            "certificate_hash": "b7f567586b4dcbc571a8da0c80ced6847df8c301"
+          }
+        },
+        {
+          "client_id": "813756731620-iv70ifml88anr41tt324dk1cuhd6ms70.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCxuaoHz5wAfJp70eKbhlJlh6rsrjsQyYw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "813756731620-iv70ifml88anr41tt324dk1cuhd6ms70.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
