@@ -64,6 +64,74 @@ class _TaskTileState extends State<TaskTile>
     return DateFormat('MMM dd').format(dateTime);
   }
 
+  Widget _buildDueTimeIndicator(ThemeData theme) {
+    if (!widget.task.hasDueTime) return const SizedBox.shrink();
+
+    final colorScheme = theme.colorScheme;
+    final dueTime = widget.task.dueTime!;
+    final now = DateTime.now();
+    final isOverdue = widget.task.isOverdue;
+    final isDueSoon = widget.task.isDueSoon;
+
+    Color indicatorColor;
+    IconData indicatorIcon;
+    String timeText;
+
+    if (widget.task.isCompleted) {
+      indicatorColor = Colors.green;
+      indicatorIcon = Icons.check_circle_rounded;
+      timeText = 'Completed on time';
+    } else if (isOverdue) {
+      indicatorColor = Colors.red;
+      indicatorIcon = Icons.warning_rounded;
+      final overdueDuration = now.difference(dueTime);
+      timeText = 'Overdue by ${_formatDuration(overdueDuration)}';
+    } else if (isDueSoon) {
+      indicatorColor = Colors.orange;
+      indicatorIcon = Icons.schedule_rounded;
+      final timeUntilDue = dueTime.difference(now);
+      timeText = 'Due in ${_formatDuration(timeUntilDue)}';
+    } else {
+      indicatorColor = colorScheme.primary;
+      indicatorIcon = Icons.access_time_rounded;
+      timeText = 'Due at ${DateFormat('h:mm a').format(dueTime)}';
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: indicatorColor.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: indicatorColor.withOpacity(0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(indicatorIcon, size: 14, color: indicatorColor),
+          const SizedBox(width: 4),
+          Text(
+            timeText,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: indicatorColor,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatDuration(Duration duration) {
+    if (duration.inDays > 0) {
+      return '${duration.inDays} day${duration.inDays != 1 ? 's' : ''}';
+    } else if (duration.inHours > 0) {
+      return '${duration.inHours} hour${duration.inHours != 1 ? 's' : ''}';
+    } else {
+      return '${duration.inMinutes} minute${duration.inMinutes != 1 ? 's' : ''}';
+    }
+  }
+
   Widget _buildStatusIndicator(ThemeData theme) {
     final colorScheme = theme.colorScheme;
 
@@ -96,10 +164,16 @@ class _TaskTileState extends State<TaskTile>
       );
     }
 
-    // Check if task is overdue
-    final isOverdue =
-        widget.task.date.isBefore(DateTime.now()) &&
-        !DateHelpers.isToday(widget.task.date);
+    // Check if task is overdue (considering due time if available)
+    bool isOverdue = false;
+    if (widget.task.hasDueTime) {
+      isOverdue = widget.task.isOverdue;
+    } else {
+      // Fallback to date-based overdue check
+      isOverdue =
+          widget.task.date.isBefore(DateTime.now()) &&
+          !_isToday(widget.task.date);
+    }
 
     if (isOverdue) {
       return Container(
@@ -112,7 +186,7 @@ class _TaskTileState extends State<TaskTile>
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.schedule_rounded, size: 14, color: Colors.red[600]),
+            Icon(Icons.warning_rounded, size: 14, color: Colors.red[600]),
             const SizedBox(width: 4),
             Text(
               'Overdue',
@@ -126,8 +200,34 @@ class _TaskTileState extends State<TaskTile>
       );
     }
 
+    // Check if task is due soon
+    if (widget.task.isDueSoon) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.orange.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.orange.withOpacity(0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.schedule_rounded, size: 14, color: Colors.orange[600]),
+            const SizedBox(width: 4),
+            Text(
+              'Due Soon',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: Colors.orange[700],
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     // Today's task
-    if (DateHelpers.isToday(widget.task.date)) {
+    if (_isToday(widget.task.date)) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
@@ -155,11 +255,30 @@ class _TaskTileState extends State<TaskTile>
     return const SizedBox.shrink();
   }
 
+  bool _isToday(DateTime date) {
+    final now = DateTime.now();
+    return date.year == now.year &&
+        date.month == now.month &&
+        date.day == now.day;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final isCompleted = widget.task.isCompleted;
+
+    // Determine border color based on task status
+    Color borderColor;
+    if (isCompleted) {
+      borderColor = Colors.green.withOpacity(0.3);
+    } else if (widget.task.isOverdue) {
+      borderColor = Colors.red.withOpacity(0.5);
+    } else if (widget.task.isDueSoon) {
+      borderColor = Colors.orange.withOpacity(0.5);
+    } else {
+      borderColor = colorScheme.outline.withOpacity(0.2);
+    }
 
     return AnimatedBuilder(
       animation: _animationController,
@@ -176,11 +295,8 @@ class _TaskTileState extends State<TaskTile>
                   AppConstants.borderRadius * 1.5,
                 ),
                 border: Border.all(
-                  color:
-                      isCompleted
-                          ? Colors.green.withOpacity(0.3)
-                          : colorScheme.outline.withOpacity(0.2),
-                  width: 1,
+                  color: borderColor,
+                  width: widget.task.isOverdue ? 2 : 1,
                 ),
                 boxShadow: [
                   BoxShadow(
@@ -286,6 +402,10 @@ class _TaskTileState extends State<TaskTile>
                                 ),
                               ],
 
+                              // Due Time Indicator
+                              if (widget.task.hasDueTime)
+                                _buildDueTimeIndicator(theme),
+
                               const SizedBox(height: 8),
 
                               // Metadata Row
@@ -323,8 +443,8 @@ class _TaskTileState extends State<TaskTile>
 
                                   const Spacer(),
 
-                                  // Due date
-                                  if (!DateHelpers.isToday(widget.task.date))
+                                  // Due date (only show if not today)
+                                  if (!_isToday(widget.task.date))
                                     Container(
                                       padding: const EdgeInsets.symmetric(
                                         horizontal: 6,

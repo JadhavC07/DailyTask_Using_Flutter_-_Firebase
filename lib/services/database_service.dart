@@ -21,20 +21,21 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 2, // Increased version for schema update
+      version: 3, // Increased version for dueTime column
       onCreate: (db, version) async {
         await db.execute('''
-          CREATE TABLE tasks(
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT,
-            date INTEGER NOT NULL,
-            isCompleted INTEGER NOT NULL DEFAULT 0,
-            createdAt INTEGER NOT NULL,
-            completedAt INTEGER,
-            synced INTEGER DEFAULT 0
-          )
-        ''');
+        CREATE TABLE tasks(
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT,
+          date INTEGER NOT NULL,
+          dueTime INTEGER,
+          isCompleted INTEGER NOT NULL DEFAULT 0,
+          createdAt INTEGER NOT NULL,
+          completedAt INTEGER,
+          synced INTEGER DEFAULT 0
+        )
+      ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -52,13 +53,32 @@ class DatabaseService {
                 'ALTER TABLE tasks ADD COLUMN synced INTEGER DEFAULT 0',
               );
               debugPrint('✅ Added synced column to tasks table');
-            } else {
-              debugPrint('ℹ️ Synced column already exists, skipping migration');
             }
           } catch (e) {
             debugPrint('❌ Error during database migration: $e');
-            // If there's any error, try to continue without the column
-            // The app will still work, just without sync status tracking
+          }
+        }
+
+        if (oldVersion < 3) {
+          // Add dueTime column
+          try {
+            final List<Map<String, dynamic>> columns = await db.rawQuery(
+              'PRAGMA table_info(tasks)',
+            );
+            final bool dueTimeColumnExists = columns.any(
+              (column) => column['name'] == 'dueTime',
+            );
+
+            if (!dueTimeColumnExists) {
+              await db.execute('ALTER TABLE tasks ADD COLUMN dueTime INTEGER');
+              debugPrint('✅ Added dueTime column to tasks table');
+            } else {
+              debugPrint(
+                'ℹ️ DueTime column already exists, skipping migration',
+              );
+            }
+          } catch (e) {
+            debugPrint('❌ Error adding dueTime column: $e');
           }
         }
       },
@@ -139,11 +159,11 @@ class DatabaseService {
     }
 
     try {
-      // Your existing sync code here...
       final taskData = {
         'title': task.title,
         'description': task.description,
         'date': task.date.millisecondsSinceEpoch,
+        'dueTime': task.dueTime?.millisecondsSinceEpoch, // Include dueTime
         'isCompleted': task.isCompleted,
         'createdAt': task.createdAt.millisecondsSinceEpoch,
         'completedAt': task.completedAt?.millisecondsSinceEpoch,
@@ -208,12 +228,16 @@ class DatabaseService {
       for (var doc in snapshot.docs) {
         try {
           final data = doc.data() as Map<String, dynamic>;
-          // Convert Firestore data to Task
+          // Convert Firestore data to Task with dueTime
           final task = Task(
             id: doc.id,
             title: data['title'] ?? '',
             description: data['description'] ?? '',
             date: DateTime.fromMillisecondsSinceEpoch(data['date'] ?? 0),
+            dueTime:
+                data['dueTime'] != null
+                    ? DateTime.fromMillisecondsSinceEpoch(data['dueTime'])
+                    : null,
             isCompleted: data['isCompleted'] ?? false,
             createdAt: DateTime.fromMillisecondsSinceEpoch(
               data['createdAt'] ?? 0,
@@ -332,5 +356,58 @@ class DatabaseService {
       }
       return false;
     }
+  }
+
+  // Add method to get tasks with due times for notification scheduling
+  static Future<List<Task>> getTasksWithDueTimes() async {
+    final db = await database;
+    final maps = await db.query(
+      'tasks',
+      where: 'dueTime IS NOT NULL AND isCompleted = 0',
+      orderBy: 'dueTime ASC',
+    );
+
+    return List.generate(maps.length, (i) {
+      return Task.fromMap(maps[i]);
+    });
+  }
+
+  // Add method to get overdue tasks
+  static Future<List<Task>> getOverdueTasks() async {
+    final db = await database;
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    final maps = await db.query(
+      'tasks',
+      where: 'dueTime IS NOT NULL AND dueTime < ? AND isCompleted = 0',
+      whereArgs: [now],
+      orderBy: 'dueTime ASC',
+    );
+
+    return List.generate(maps.length, (i) {
+      return Task.fromMap(maps[i]);
+    });
+  }
+
+  // Add method to get tasks due soon (within next 2 hours)
+  static Future<List<Task>> getTasksDueSoon() async {
+    final db = await database;
+    final now = DateTime.now();
+    final twoHoursLater = now.add(const Duration(hours: 2));
+
+    final maps = await db.query(
+      'tasks',
+      where:
+          'dueTime IS NOT NULL AND dueTime > ? AND dueTime <= ? AND isCompleted = 0',
+      whereArgs: [
+        now.millisecondsSinceEpoch,
+        twoHoursLater.millisecondsSinceEpoch,
+      ],
+      orderBy: 'dueTime ASC',
+    );
+
+    return List.generate(maps.length, (i) {
+      return Task.fromMap(maps[i]);
+    });
   }
 }
