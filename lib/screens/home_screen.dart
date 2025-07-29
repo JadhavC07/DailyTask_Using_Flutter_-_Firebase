@@ -21,7 +21,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   DateTime selectedDate = DateTime.now();
   List<Task> tasks = [];
   bool isLoading = false;
@@ -29,12 +29,49 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _loadTasks();
-    _setupDailyReminder();
+    WidgetsBinding.instance.addObserver(this);
+    _initializeScreen();
   }
 
-  void _setupDailyReminder() async {
-    await NotificationService.scheduleDailyReminder();
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.resumed) {
+      // App came to foreground, check for immediate notifications
+      _checkImmediateNotifications();
+    }
+  }
+
+  Future<void> _initializeScreen() async {
+    await _loadTasks();
+    await _setupNotifications();
+    await _checkImmediateNotifications();
+  }
+
+  Future<void> _setupNotifications() async {
+    try {
+      // Setup daily reminder
+      await NotificationService.scheduleDailyReminder();
+
+      debugPrint('✅ Notifications setup completed');
+    } catch (e) {
+      debugPrint('❌ Error setting up notifications: $e');
+    }
+  }
+
+  Future<void> _checkImmediateNotifications() async {
+    try {
+      await NotificationService.checkAndSendImmediateNotifications();
+    } catch (e) {
+      debugPrint('❌ Error checking immediate notifications: $e');
+    }
   }
 
   Future<void> _loadTasks() async {
@@ -129,13 +166,19 @@ class _HomeScreenState extends State<HomeScreen> {
         tasks = [...tasks, result];
       });
 
-      _saveTaskInBackground(result);
+      await _saveTaskInBackground(result);
     }
   }
 
   Future<void> _saveTaskInBackground(Task task) async {
     try {
       await DatabaseService.insertLocalTask(task);
+
+      // Schedule notifications for the new task
+      if (task.hasDueTime && !task.isCompleted) {
+        await NotificationService.scheduleAllTaskNotifications(task);
+        debugPrint('🔔 Notifications scheduled for new task: ${task.title}');
+      }
 
       final authService = Provider.of<AuthService>(context, listen: false);
       if (authService.isAuthenticated && !await authService.isOfflineMode()) {
@@ -153,7 +196,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   size: 20,
                 ),
                 const SizedBox(width: 8),
-                const Text('Task saved successfully'),
+                Expanded(
+                  child: Text(
+                    task.hasDueTime
+                        ? 'Task saved and notifications scheduled'
+                        : 'Task saved successfully',
+                  ),
+                ),
               ],
             ),
             backgroundColor: Colors.green,
@@ -210,9 +259,42 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await DatabaseService.updateLocalTask(updatedTask);
 
+      // Update notifications based on completion status
+      if (updatedTask.isCompleted) {
+        // Cancel notifications when task is completed
+        await NotificationService.cancelTaskNotifications(updatedTask.id);
+        debugPrint(
+          '🚫 Cancelled notifications for completed task: ${updatedTask.title}',
+        );
+      } else if (updatedTask.hasDueTime) {
+        // Reschedule notifications when task is marked as incomplete
+        await NotificationService.scheduleAllTaskNotifications(updatedTask);
+        debugPrint(
+          '🔔 Rescheduled notifications for incomplete task: ${updatedTask.title}',
+        );
+      }
+
       final authService = Provider.of<AuthService>(context, listen: false);
       if (authService.isAuthenticated && !await authService.isOfflineMode()) {
         await DatabaseService.syncToCloud(updatedTask);
+      }
+
+      // Show completion feedback
+      if (mounted && updatedTask.isCompleted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.celebration, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text('Great job! "${updatedTask.title}" completed'),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+          ),
+        );
       }
     } catch (e) {
       debugPrint('❌ Toggle task error: $e');
@@ -267,6 +349,9 @@ class _HomeScreenState extends State<HomeScreen> {
       await DatabaseService.syncFromCloud();
       await _loadTasks();
 
+      // Reschedule notifications after sync
+      await NotificationService.rescheduleAllNotifications();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -274,7 +359,7 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Icon(Icons.cloud_done, color: Colors.white),
                 SizedBox(width: 8),
-                Text('Tasks synced successfully'),
+                Text('Tasks synced and notifications updated'),
               ],
             ),
             backgroundColor: Colors.green,
@@ -306,6 +391,37 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // Helper method to show notification permission dialog
+  Future<void> _checkNotificationPermissions() async {
+    final areEnabled = await NotificationService.areNotificationsEnabled();
+
+    if (!areEnabled && mounted) {
+      showDialog(
+        context: context,
+        builder:
+            (context) => AlertDialog(
+              title: const Text('Enable Notifications'),
+              content: const Text(
+                'To receive timely reminders for your tasks, please enable notifications in your device settings.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Later'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    NotificationService.openNotificationSettings();
+                  },
+                  child: const Text('Open Settings'),
+                ),
+              ],
+            ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -325,6 +441,13 @@ class _HomeScreenState extends State<HomeScreen> {
         scrolledUnderElevation: 1,
         surfaceTintColor: theme.colorScheme.primary,
         actions: [
+          // Notification permission check button
+          IconButton(
+            onPressed: _checkNotificationPermissions,
+            icon: const Icon(Icons.notifications_outlined),
+            tooltip: 'Check Notifications',
+          ),
+
           // Theme toggle button
           const ThemeToggleButton(),
           const SizedBox(width: 8),
