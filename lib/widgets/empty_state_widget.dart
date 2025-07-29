@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:myapp/widgets/lib/crash_test_widget.dart';
 
 class EmptyStateWidget extends StatelessWidget {
   final DateTime selectedDate;
@@ -52,6 +53,7 @@ class EmptyStateWidget extends StatelessWidget {
             icon: const Icon(Icons.add_rounded),
             label: const Text('Add Task'),
           ),
+          // const CrashTestWidget(),
         ],
       ),
     );

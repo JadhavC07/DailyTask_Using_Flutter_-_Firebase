@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:myapp/services/crashlytics_service.dart';
 
 class AuthService extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
@@ -13,6 +14,11 @@ class AuthService extends ChangeNotifier {
 
   AuthService() {
     _initializeGoogle();
+
+    // Listen for auth state changes and update Crashlytics user info
+    _auth.authStateChanges().listen((User? user) {
+      CrashlyticsService.setUserInfo();
+    });
   }
 
   User? get currentUser => _auth.currentUser;
@@ -24,9 +30,25 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> setOfflineMode(bool offline) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('offline_mode', offline);
-    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('offline_mode', offline);
+
+      await CrashlyticsService.recordAuthEvent(
+        'offline_mode_changed',
+        success: true,
+      );
+      await CrashlyticsService.setCustomKey('offline_mode', offline);
+
+      notifyListeners();
+    } catch (e, stackTrace) {
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Failed to set offline mode',
+        fatal: false,
+      );
+    }
   }
 
   Future<void> _initializeGoogle() async {
@@ -36,14 +58,28 @@ class AuthService extends ChangeNotifier {
         await _googleSignIn.initialize();
         _isGoogleInitialized = true;
         debugPrint('✅ Google Sign-In initialized successfully');
+
+        await CrashlyticsService.recordAuthEvent(
+          'google_signin_initialized',
+          method: 'google',
+          success: true,
+        );
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('❌ Google Sign-In initialization error: $e');
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Google Sign-In initialization failed',
+        fatal: false,
+      );
     }
   }
 
   Future<UserCredential?> signInWithGoogle() async {
     try {
+      await CrashlyticsService.log('Starting Google sign-in process');
+
       // Ensure Google Sign-In is initialized
       await _initializeGoogle();
 
@@ -51,6 +87,8 @@ class AuthService extends ChangeNotifier {
       final GoogleSignInAccount googleUser = await _googleSignIn.authenticate(
         scopeHint: ['email', 'profile'],
       );
+
+      await CrashlyticsService.log('Google authentication successful');
 
       // 2️⃣ Get authentication details (synchronous in v7.1.1)
       final GoogleSignInAuthentication googleAuth = googleUser.authentication;
@@ -70,6 +108,11 @@ class AuthService extends ChangeNotifier {
         authz = await authClient.authorizationForScopes(['email', 'profile']);
       } catch (e) {
         debugPrint('Authorization step failed: $e');
+        await CrashlyticsService.recordError(
+          exception: e,
+          reason: 'Google authorization step failed',
+          fatal: false,
+        );
         // Continue without access token if authorization fails
       }
 
@@ -88,16 +131,63 @@ class AuthService extends ChangeNotifier {
       await setOfflineMode(false);
       notifyListeners();
 
+      // Update Crashlytics with successful sign-in
+      await CrashlyticsService.recordAuthEvent(
+        'google_signin_success',
+        method: 'google',
+        success: true,
+      );
+      await CrashlyticsService.setUserInfo();
+
       debugPrint('✅ Google sign-in successful: ${userCredential.user?.email}');
       return userCredential;
-    } on GoogleSignInException catch (e) {
+    } on GoogleSignInException catch (e, stackTrace) {
       debugPrint('🔥 Google Sign-In Error: ${e.code.name} - ${e.description}');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Google Sign-In failed: ${e.code.name}',
+        fatal: false,
+      );
+      await CrashlyticsService.recordAuthEvent(
+        'google_signin_failed',
+        method: 'google',
+        success: false,
+      );
+
       return null;
-    } on FirebaseAuthException catch (e) {
+    } on FirebaseAuthException catch (e, stackTrace) {
       debugPrint('🔥 Firebase Auth Error: ${e.code} - ${e.message}');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Firebase Auth failed: ${e.code}',
+        fatal: false,
+      );
+      await CrashlyticsService.recordAuthEvent(
+        'firebase_auth_failed',
+        method: 'google',
+        success: false,
+      );
+
       return null;
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('❌ Google sign in error: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Unexpected Google sign-in error',
+        fatal: false,
+      );
+      await CrashlyticsService.recordAuthEvent(
+        'signin_unexpected_error',
+        method: 'google',
+        success: false,
+      );
+
       return null;
     }
   }
@@ -105,6 +195,8 @@ class AuthService extends ChangeNotifier {
   // Alternative simpler method if you don't need authorization scopes
   Future<UserCredential?> signInWithGoogleSimple() async {
     try {
+      await CrashlyticsService.log('Starting simple Google sign-in process');
+
       // Ensure Google Sign-In is initialized
       await _initializeGoogle();
 
@@ -127,13 +219,41 @@ class AuthService extends ChangeNotifier {
       await setOfflineMode(false);
       notifyListeners();
 
+      await CrashlyticsService.recordAuthEvent(
+        'google_signin_simple_success',
+        method: 'google_simple',
+        success: true,
+      );
+      await CrashlyticsService.setUserInfo();
+
       debugPrint('✅ Google sign-in successful: ${userCredential.user?.email}');
       return userCredential;
-    } on GoogleSignInException catch (e) {
+    } on GoogleSignInException catch (e, stackTrace) {
       debugPrint('🔥 Google Sign-In Error: ${e.code.name} - ${e.description}');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Simple Google Sign-In failed: ${e.code.name}',
+        fatal: false,
+      );
+      await CrashlyticsService.recordAuthEvent(
+        'google_signin_simple_failed',
+        method: 'google_simple',
+        success: false,
+      );
+
       return null;
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('❌ Google sign in error: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Unexpected simple Google sign-in error',
+        fatal: false,
+      );
+
       return null;
     }
   }
@@ -141,19 +261,56 @@ class AuthService extends ChangeNotifier {
   // Sign Out
   Future<void> signOut() async {
     try {
+      await CrashlyticsService.log('Starting sign out process');
+
       await Future.wait([_auth.signOut(), _googleSignIn.signOut()]);
+
+      await CrashlyticsService.recordAuthEvent(
+        'signout_success',
+        success: true,
+      );
+      await CrashlyticsService.setUserInfo(); // This will clear user info
+
       notifyListeners();
       debugPrint('✅ Sign out successful');
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('❌ Sign out error: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Sign out failed',
+        fatal: false,
+      );
+      await CrashlyticsService.recordAuthEvent(
+        'signout_failed',
+        success: false,
+      );
     }
   }
 
   // Continue as Guest (Offline Mode)
   Future<void> continueAsGuest() async {
-    await setOfflineMode(true);
-    notifyListeners();
-    debugPrint('✅ Continuing as guest (offline mode)');
+    try {
+      await setOfflineMode(true);
+
+      await CrashlyticsService.recordAuthEvent(
+        'guest_mode_enabled',
+        method: 'guest',
+        success: true,
+      );
+      await CrashlyticsService.log('User continued as guest');
+
+      notifyListeners();
+      debugPrint('✅ Continuing as guest (offline mode)');
+    } catch (e, stackTrace) {
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Failed to continue as guest',
+        fatal: false,
+      );
+    }
   }
 
   // Check if user is signed in with Google

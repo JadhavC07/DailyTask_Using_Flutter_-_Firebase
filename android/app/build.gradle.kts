@@ -9,13 +9,10 @@ android {
     namespace = "com.transbuzz.newapp"
     compileSdk = flutter.compileSdkVersion
 
-    // ─── Force all plugins to use NDK 27 (required by your firebase + native libs) ───
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.transbuzz.newapp"
-
-        // ─── Raise minSdk to at least 23 for firestore:26.0.0, etc. ───────────────
         minSdk = 23       
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

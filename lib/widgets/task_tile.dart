@@ -1,13 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:myapp/utils/constants.dart';
+import 'package:myapp/services/database_service.dart'; // Add this import
 import '../models/task.dart';
+import 'task_actions_sheet.dart';
+import 'edit_task_dialog.dart';
 
 class TaskTile extends StatefulWidget {
   final Task task;
   final VoidCallback onToggle;
   final VoidCallback? onLongPress;
   final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
+  final Function(Task)? onTaskUpdated; // Callback for when task is updated
+  final VoidCallback? onTaskDeleted; // Callback for when task is deleted
 
   const TaskTile({
     super.key,
@@ -15,6 +21,9 @@ class TaskTile extends StatefulWidget {
     required this.onToggle,
     this.onLongPress,
     this.onEdit,
+    this.onDelete,
+    this.onTaskUpdated,
+    this.onTaskDeleted,
   });
 
   @override
@@ -26,6 +35,8 @@ class _TaskTileState extends State<TaskTile>
   late AnimationController _animationController;
   late Animation<double> _scaleAnimation;
   late Animation<double> _fadeAnimation;
+  bool _isDeleting = false;
+  bool _isUpdating = false;
 
   @override
   void initState() {
@@ -62,6 +73,208 @@ class _TaskTileState extends State<TaskTile>
     if (difference.inDays < 7) return '${difference.inDays}d ago';
 
     return DateFormat('MMM dd').format(dateTime);
+  }
+
+  // Handle task actions from the bottom sheet
+  Future<void> _handleTaskAction(BuildContext context) async {
+    if (_isDeleting || _isUpdating) return;
+
+    final action = await TaskActionsSheet.show(context, widget.task);
+
+    if (!mounted || action == null) return;
+
+    switch (action) {
+      case TaskAction.edit:
+        await _handleEditTask(context);
+        break;
+      case TaskAction.delete:
+        await _handleDeleteTask(context);
+        break;
+      case TaskAction.markComplete:
+      case TaskAction.markIncomplete:
+        widget.onToggle();
+        break;
+    }
+  }
+
+  // FIXED: Handle edit task with proper error handling
+  Future<void> _handleEditTask(BuildContext context) async {
+    if (_isUpdating) return;
+
+    try {
+      setState(() => _isUpdating = true);
+
+      final updatedTask = await showDialog<Task>(
+        context: context,
+        barrierDismissible: false, // Prevent dismissing during loading
+        builder: (context) => EditTaskDialog(task: widget.task),
+      );
+
+      if (!mounted || updatedTask == null) return;
+
+      try {
+        // Update the task in the database
+        await DatabaseService.updateTask(updatedTask);
+
+        // Notify parent widget
+        if (widget.onTaskUpdated != null) {
+          widget.onTaskUpdated!(updatedTask);
+        }
+
+        // Show success message
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.check_circle, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Text('Task "${updatedTask.title}" updated successfully'),
+                ],
+              ),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      } catch (e) {
+        debugPrint('❌ Failed to update task: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.error, color: Colors.white),
+                  const SizedBox(width: 8),
+                  const Text('Failed to update task. Please try again.'),
+                ],
+              ),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ Error in edit task dialog: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('An error occurred. Please try again.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isUpdating = false);
+      }
+    }
+  }
+
+  // FIXED: Handle delete task with proper error handling and animation
+  Future<void> _handleDeleteTask(BuildContext context) async {
+    if (_isDeleting) return;
+
+    // Show confirmation dialog
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Delete Task'),
+            content: Text(
+              'Are you sure you want to delete "${widget.task.title}"?\n\nThis action cannot be undone.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    try {
+      setState(() => _isDeleting = true);
+
+      // Animate out the tile
+      await _animationController.reverse();
+
+      // Delete the task from database
+      await DatabaseService.deleteTask(widget.task.id);
+
+      if (mounted) {
+        // Notify parent widget
+        if (widget.onTaskDeleted != null) {
+          widget.onTaskDeleted!();
+        } else if (widget.onDelete != null) {
+          widget.onDelete!();
+        }
+
+        // Show success message
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.delete, color: Colors.white),
+                const SizedBox(width: 8),
+                Text('Task "${widget.task.title}" deleted'),
+              ],
+            ),
+            backgroundColor: Colors.red[600],
+            duration: const Duration(seconds: 2),
+            action: SnackBarAction(
+              label: 'UNDO',
+              textColor: Colors.white,
+              onPressed: () {
+                // TODO: Implement undo functionality if needed
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Undo is not yet implemented'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Failed to delete task: $e');
+
+      // Restore animation if delete failed
+      if (mounted) {
+        await _animationController.forward();
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error, color: Colors.white),
+                const SizedBox(width: 8),
+                const Text('Failed to delete task. Please try again.'),
+              ],
+            ),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isDeleting = false);
+      }
+    }
   }
 
   Widget _buildDueTimeIndicator(ThemeData theme) {
@@ -262,6 +475,55 @@ class _TaskTileState extends State<TaskTile>
         date.day == now.day;
   }
 
+  Widget _buildActionButtons(ThemeData theme) {
+    final colorScheme = theme.colorScheme;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Edit Button
+        IconButton(
+          onPressed: () => _handleEditTask(context),
+          icon: const Icon(Icons.edit_outlined),
+          style: IconButton.styleFrom(
+            backgroundColor: colorScheme.secondaryContainer.withOpacity(0.3),
+            foregroundColor: colorScheme.secondary,
+            minimumSize: const Size(36, 36),
+          ),
+          tooltip: 'Edit task',
+        ),
+
+        const SizedBox(width: 4),
+
+        // Delete Button
+        IconButton(
+          onPressed: () => _handleDeleteTask(context),
+          icon: const Icon(Icons.delete_outline_rounded),
+          style: IconButton.styleFrom(
+            backgroundColor: Colors.red.withOpacity(0.1),
+            foregroundColor: Colors.red[600],
+            minimumSize: const Size(36, 36),
+          ),
+          tooltip: 'Delete task',
+        ),
+
+        const SizedBox(width: 4),
+
+        // More Options Button
+        IconButton(
+          onPressed: () => _handleTaskAction(context),
+          icon: const Icon(Icons.more_vert_rounded),
+          style: IconButton.styleFrom(
+            backgroundColor: colorScheme.surfaceVariant.withOpacity(0.5),
+            foregroundColor: colorScheme.onSurfaceVariant,
+            minimumSize: const Size(36, 36),
+          ),
+          tooltip: 'More options',
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -310,7 +572,8 @@ class _TaskTileState extends State<TaskTile>
                 color: Colors.transparent,
                 child: InkWell(
                   onTap: widget.onToggle,
-                  onLongPress: widget.onLongPress,
+                  onLongPress:
+                      widget.onLongPress ?? () => _handleTaskAction(context),
                   borderRadius: BorderRadius.circular(
                     AppConstants.borderRadius * 1.5,
                   ),
@@ -473,20 +736,10 @@ class _TaskTileState extends State<TaskTile>
                           ),
                         ),
 
-                        // Edit Button (if provided)
-                        if (widget.onEdit != null) ...[
-                          const SizedBox(width: 8),
-                          IconButton(
-                            onPressed: widget.onEdit,
-                            icon: const Icon(Icons.edit_outlined),
-                            style: IconButton.styleFrom(
-                              backgroundColor: colorScheme.surfaceVariant
-                                  .withOpacity(0.5),
-                              foregroundColor: colorScheme.onSurfaceVariant,
-                              minimumSize: const Size(36, 36),
-                            ),
-                          ),
-                        ],
+                        const SizedBox(width: 8),
+
+                        // Action Buttons
+                        _buildActionButtons(theme),
                       ],
                     ),
                   ),

@@ -1,5 +1,6 @@
 // lib/services/database_service.dart
 import 'package:myapp/models/task.dart';
+import 'package:myapp/services/crashlytics_service.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -134,6 +135,16 @@ class DatabaseService {
 
   static Future<void> insertLocalTask(Task task) async {
     try {
+      await CrashlyticsService.recordTaskOperation(
+        'insert_local_task',
+        taskId: task.id,
+        taskTitle: task.title,
+        additionalData: {
+          'has_due_time': task.hasDueTime,
+          'is_completed': task.isCompleted,
+        },
+      );
+
       final db = await database;
       await db.insert(
         'tasks',
@@ -146,14 +157,35 @@ class DatabaseService {
       if (task.hasDueTime && !task.isCompleted) {
         await _scheduleTaskNotifications(task);
       }
-    } catch (e) {
+
+      await CrashlyticsService.log('Task inserted successfully: ${task.title}');
+    } catch (e, stackTrace) {
       debugPrint('❌ Error inserting local task: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Failed to insert local task: ${task.title}',
+        fatal: false,
+      );
+
       rethrow;
     }
   }
 
+  // FIXED: Enhanced updateLocalTask method
   static Future<void> updateLocalTask(Task task) async {
     try {
+      await CrashlyticsService.recordTaskOperation(
+        'update_local_task',
+        taskId: task.id,
+        taskTitle: task.title,
+        additionalData: {
+          'has_due_time': task.hasDueTime,
+          'is_completed': task.isCompleted,
+        },
+      );
+
       final db = await database;
       await db.update(
         'tasks',
@@ -165,22 +197,132 @@ class DatabaseService {
 
       // Update notifications
       await _updateTaskNotifications(task);
-    } catch (e) {
+
+      await CrashlyticsService.log('Task updated successfully: ${task.title}');
+    } catch (e, stackTrace) {
       debugPrint('❌ Error updating local task: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Failed to update local task: ${task.title}',
+        fatal: false,
+      );
+
       rethrow;
     }
   }
 
+  // FIXED: Enhanced deleteLocalTask method
   static Future<void> deleteLocalTask(String id) async {
     try {
+      await CrashlyticsService.recordTaskOperation(
+        'delete_local_task',
+        taskId: id,
+      );
+
       final db = await database;
       await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
 
       // Cancel notifications for deleted task
       await _cancelTaskNotifications(id);
       debugPrint('✅ Task deleted locally: $id');
-    } catch (e) {
+
+      await CrashlyticsService.log('Task deleted successfully: $id');
+    } catch (e, stackTrace) {
       debugPrint('❌ Error deleting local task: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Failed to delete local task: $id',
+        fatal: false,
+      );
+
+      rethrow;
+    }
+  }
+
+  // FIXED: Enhanced deleteFromCloud method
+  static Future<void> deleteFromCloud(String taskId) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      debugPrint('❌ Cannot delete from cloud: User not authenticated');
+      return;
+    }
+
+    if (!await isFirestoreAvailable()) {
+      debugPrint('❌ Skipping cloud delete: Firestore database not available');
+      return;
+    }
+
+    try {
+      final docRef = _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('tasks')
+          .doc(taskId);
+
+      // Check if document exists before deleting
+      final docSnapshot = await docRef.get();
+      if (!docSnapshot.exists) {
+        debugPrint('⚠️ Task not found in cloud: $taskId');
+        return;
+      }
+
+      await docRef.delete();
+      debugPrint('✅ Task deleted from cloud: $taskId');
+    } catch (e) {
+      debugPrint('❌ Delete from cloud failed: $e');
+      rethrow;
+    }
+  }
+
+  // FIXED: Enhanced complete delete method (both local and cloud)
+  static Future<void> deleteTask(String taskId) async {
+    if (taskId.isEmpty) {
+      debugPrint('❌ Cannot delete task: Invalid task ID');
+      return;
+    }
+
+    try {
+      // Delete from local database first
+      await deleteLocalTask(taskId);
+
+      // Then try to delete from cloud if user is authenticated
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        try {
+          await deleteFromCloud(taskId);
+        } catch (e) {
+          debugPrint(
+            '⚠️ Cloud deletion failed, but local deletion succeeded: $e',
+          );
+          // Don't rethrow here - local deletion succeeded
+        }
+      }
+
+      debugPrint('✅ Task completely deleted: $taskId');
+    } catch (e) {
+      debugPrint('❌ Task deletion failed: $e');
+      rethrow;
+    }
+  }
+
+  // FIXED: Enhanced updateTask method that handles both local and cloud
+  static Future<void> updateTask(Task task) async {
+    if (task.id.isEmpty) {
+      debugPrint('❌ Cannot update task: Invalid task ID');
+      return;
+    }
+
+    try {
+      // Update local database first
+      await updateLocalTask(task);
+
+      debugPrint('✅ Task update completed: ${task.title} (${task.id})');
+    } catch (e) {
+      debugPrint('❌ Task update failed: $e');
       rethrow;
     }
   }
@@ -221,20 +363,37 @@ class DatabaseService {
     return Future.value(null); // Will be replaced with proper import
   }
 
-  // Cloud Operations (Firebase Firestore) - keeping existing implementation
+  // FIXED: Enhanced syncToCloud method
+
   static Future<void> syncToCloud(Task task) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       debugPrint('❌ Cannot sync to cloud: User not authenticated');
+      await CrashlyticsService.recordSyncEvent(
+        'sync_to_cloud_failed_no_user',
+        success: false,
+        error: 'User not authenticated',
+      );
       return;
     }
 
     if (!await isFirestoreAvailable()) {
       debugPrint('❌ Skipping cloud sync: Firestore database not available');
+      await CrashlyticsService.recordSyncEvent(
+        'sync_to_cloud_failed_firestore_unavailable',
+        success: false,
+        error: 'Firestore database not available',
+      );
       return;
     }
 
     try {
+      await CrashlyticsService.recordSyncEvent(
+        'sync_to_cloud_started',
+        taskCount: 1,
+        success: true,
+      );
+
       final taskData = {
         'title': task.title,
         'description': task.description,
@@ -265,11 +424,36 @@ class DatabaseService {
         );
       } catch (e) {
         debugPrint('⚠️ Could not update sync status locally: $e');
+        await CrashlyticsService.recordError(
+          exception: e,
+          reason: 'Failed to update local sync status',
+          fatal: false,
+        );
       }
 
+      await CrashlyticsService.recordSyncEvent(
+        'sync_to_cloud_success',
+        taskCount: 1,
+        success: true,
+      );
+
       debugPrint('✅ Task synced to cloud: ${task.title}');
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('❌ Sync to cloud failed: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Failed to sync task to cloud: ${task.title}',
+        fatal: false,
+      );
+
+      await CrashlyticsService.recordSyncEvent(
+        'sync_to_cloud_failed',
+        taskCount: 1,
+        success: false,
+        error: e.toString(),
+      );
     }
   }
 
@@ -339,9 +523,18 @@ class DatabaseService {
   // Sync all unsynced local tasks to cloud
   static Future<void> syncAllToCloud() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      await CrashlyticsService.recordSyncEvent(
+        'sync_all_failed_no_user',
+        success: false,
+        error: 'User not authenticated',
+      );
+      return;
+    }
 
     try {
+      await CrashlyticsService.log('Starting bulk sync to cloud');
+
       final db = await database;
 
       List<Map<String, dynamic>> unsyncedTasks = [];
@@ -358,14 +551,64 @@ class DatabaseService {
 
       debugPrint('🔄 Syncing ${unsyncedTasks.length} unsynced tasks...');
 
+      await CrashlyticsService.recordSyncEvent(
+        'sync_all_started',
+        taskCount: unsyncedTasks.length,
+        success: true,
+      );
+
+      int successCount = 0;
+      int failureCount = 0;
+
       for (var taskMap in unsyncedTasks) {
-        final task = Task.fromMap(taskMap);
-        await syncToCloud(task);
+        try {
+          final task = Task.fromMap(taskMap);
+          await syncToCloud(task);
+          successCount++;
+        } catch (e) {
+          failureCount++;
+          await CrashlyticsService.recordError(
+            exception: e,
+            reason: 'Failed to sync individual task in bulk sync',
+            fatal: false,
+          );
+        }
       }
 
-      debugPrint('✅ All tasks synced to cloud');
-    } catch (e) {
+      await CrashlyticsService.recordSyncEvent(
+        'sync_all_completed',
+        taskCount: unsyncedTasks.length,
+        success: failureCount == 0,
+        error: failureCount > 0 ? '$failureCount tasks failed to sync' : null,
+      );
+
+      await CrashlyticsService.setCustomKey(
+        'last_bulk_sync_success_count',
+        successCount,
+      );
+      await CrashlyticsService.setCustomKey(
+        'last_bulk_sync_failure_count',
+        failureCount,
+      );
+
+      debugPrint(
+        '✅ Bulk sync completed: $successCount success, $failureCount failures',
+      );
+    } catch (e, stackTrace) {
       debugPrint('❌ Bulk sync failed: $e');
+
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Bulk sync to cloud failed',
+        fatal: false,
+      );
+
+      await CrashlyticsService.recordSyncEvent(
+        'sync_all_failed',
+        success: false,
+        error: e.toString(),
+      );
     }
   }
 

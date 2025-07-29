@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:myapp/firebase_options.dart';
 import 'package:myapp/services/theme_service.dart';
+import 'package:myapp/services/crashlytics_service.dart';
 import 'package:provider/provider.dart';
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'services/auth_service.dart';
@@ -31,13 +32,24 @@ void main() async {
     );
     debugPrint('✅ Firebase initialized successfully');
 
+    // Initialize Crashlytics (should be done early)
+    await CrashlyticsService.initialize();
+    debugPrint('✅ Crashlytics initialized');
+
+    // Log app startup
+    await CrashlyticsService.log('App starting up');
+    await CrashlyticsService.setCustomKey('app_version', '1.0.0');
+    await CrashlyticsService.setCustomKey('platform', 'Android');
+
     // Initialize local database first
     await DatabaseService.database;
     debugPrint('✅ Local database initialized');
+    await CrashlyticsService.log('Local database initialized');
 
     // Initialize Notifications
     await NotificationService.initialize();
     debugPrint('✅ Notifications initialized');
+    await CrashlyticsService.recordNotificationEvent('service_initialized');
 
     // Initialize existing tasks notifications
     await _initializeTaskNotifications();
@@ -46,10 +58,20 @@ void main() async {
     // Initialize sync service
     SyncService.initialize();
     debugPrint('✅ Sync service initialized');
+    await CrashlyticsService.recordSyncEvent('service_initialized');
 
+    await CrashlyticsService.log('App initialization completed successfully');
     debugPrint('✅ App initialization completed');
-  } catch (e) {
+  } catch (e, stackTrace) {
     debugPrint('❌ Initialization error: $e');
+
+    // Record the initialization error in Crashlytics
+    await CrashlyticsService.recordError(
+      exception: e,
+      stackTrace: stackTrace,
+      reason: 'App initialization failed',
+      fatal: false,
+    );
   }
 
   runApp(const MyApp());
@@ -57,6 +79,8 @@ void main() async {
 
 Future<void> _initializeTaskNotifications() async {
   try {
+    await CrashlyticsService.log('Initializing task notifications');
+
     // Get all tasks with due times
     final tasks = await DatabaseService.getLocalTasks();
     final tasksWithDueTimes =
@@ -66,12 +90,28 @@ Future<void> _initializeTaskNotifications() async {
       '🔔 Initializing notifications for ${tasksWithDueTimes.length} tasks',
     );
 
+    await CrashlyticsService.setCustomKey(
+      'tasks_with_notifications',
+      tasksWithDueTimes.length,
+    );
+
     // Schedule notifications for each task
     for (final task in tasksWithDueTimes) {
       try {
         await NotificationService.scheduleAllTaskNotifications(task);
-      } catch (e) {
+        await CrashlyticsService.recordNotificationEvent(
+          'scheduled',
+          taskId: task.id,
+          notificationType: 'task_reminder',
+        );
+      } catch (e, stackTrace) {
         debugPrint('❌ Error scheduling notifications: $e');
+        await CrashlyticsService.recordError(
+          exception: e,
+          stackTrace: stackTrace,
+          reason: 'Failed to schedule task notification',
+          fatal: false,
+        );
       }
     }
 
@@ -80,8 +120,16 @@ Future<void> _initializeTaskNotifications() async {
 
     // Setup daily reminder
     await NotificationService.scheduleDailyReminder();
-  } catch (e) {
+
+    await CrashlyticsService.log('Task notifications initialized successfully');
+  } catch (e, stackTrace) {
     debugPrint('❌ Error initializing task notifications: $e');
+    await CrashlyticsService.recordError(
+      exception: e,
+      stackTrace: stackTrace,
+      reason: 'Task notifications initialization failed',
+      fatal: false,
+    );
   }
 }
 
@@ -133,15 +181,28 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _initializeApp() async {
-    // Add a small delay for splash effect
-    await Future.delayed(const Duration(seconds: 2));
+    try {
+      await CrashlyticsService.log('Splash screen displayed');
 
-    if (!mounted) return;
+      // Add a small delay for splash effect
+      await Future.delayed(const Duration(seconds: 2));
 
-    // Navigate to AuthWrapper
-    Navigator.of(
-      context,
-    ).pushReplacement(MaterialPageRoute(builder: (_) => const AuthWrapper()));
+      if (!mounted) return;
+
+      // Navigate to AuthWrapper
+      Navigator.of(
+        context,
+      ).pushReplacement(MaterialPageRoute(builder: (_) => const AuthWrapper()));
+
+      await CrashlyticsService.log('Navigation to AuthWrapper completed');
+    } catch (e, stackTrace) {
+      await CrashlyticsService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        reason: 'Splash screen initialization failed',
+        fatal: false,
+      );
+    }
   }
 
   @override
