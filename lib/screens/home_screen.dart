@@ -82,36 +82,88 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final authService = Provider.of<AuthService>(context, listen: false);
 
     try {
-      final tasks = await compute(_loadTasksInBackground, {
-        'isAuthenticated': authService.isAuthenticated,
-        'isOfflineMode': await authService.isOfflineMode(),
-        'selectedDate': selectedDate.millisecondsSinceEpoch,
-      });
+      debugPrint('🔄 Loading tasks for date: $selectedDate');
+
+      List<Task> loadedTasks = [];
+
+      // Try to load from cloud if authenticated and online
+      if (authService.isAuthenticated && !await authService.isOfflineMode()) {
+        try {
+          debugPrint('☁️ Loading tasks from cloud...');
+          final cloudTasks = await DatabaseService.getCloudTasks(
+            date: selectedDate,
+          );
+
+          if (cloudTasks.isNotEmpty) {
+            debugPrint(
+              '📥 Got ${cloudTasks.length} tasks from cloud, syncing to local...',
+            );
+            // Sync cloud tasks to local database
+            for (final task in cloudTasks) {
+              try {
+                await DatabaseService.insertLocalTask(task);
+              } catch (e) {
+                debugPrint(
+                  '⚠️ Failed to sync task to local: ${task.title} - $e',
+                );
+              }
+            }
+          }
+
+          // Always load from local database to ensure consistency
+          loadedTasks = await DatabaseService.getLocalTasks(date: selectedDate);
+          debugPrint(
+            '📱 Loaded ${loadedTasks.length} tasks from local after cloud sync',
+          );
+        } catch (cloudError) {
+          debugPrint(
+            '⚠️ Cloud loading failed, falling back to local: $cloudError',
+          );
+          // Fallback to local if cloud fails
+          loadedTasks = await DatabaseService.getLocalTasks(date: selectedDate);
+        }
+      } else {
+        // Load from local database (offline mode or not authenticated)
+        debugPrint('📱 Loading tasks from local database...');
+        loadedTasks = await DatabaseService.getLocalTasks(date: selectedDate);
+      }
 
       if (!mounted) return;
 
       setState(() {
-        this.tasks = tasks;
+        tasks = loadedTasks;
       });
-      debugPrint('✅ Loaded ${tasks.length} tasks');
+
+      debugPrint('✅ Successfully loaded ${loadedTasks.length} tasks');
     } catch (e) {
       debugPrint('❌ Load tasks error: $e');
-      if (!mounted) return;
 
+      // Final fallback - always try to load from local database
       try {
+        debugPrint('🔄 Final fallback: loading from local database...');
         final localTasks = await DatabaseService.getLocalTasks(
           date: selectedDate,
         );
-        setState(() {
-          tasks = localTasks;
-        });
-      } catch (localError) {
-        debugPrint('❌ Local tasks error: $localError');
+
         if (mounted) {
+          setState(() {
+            tasks = localTasks;
+          });
+          debugPrint(
+            '✅ Fallback successful: loaded ${localTasks.length} local tasks',
+          );
+        }
+      } catch (localError) {
+        debugPrint('❌ Fatal error - cannot load local tasks: $localError');
+        if (mounted) {
+          setState(() {
+            tasks = []; // Set empty list as final fallback
+          });
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('Failed to load tasks: ${localError.toString()}'),
               backgroundColor: Theme.of(context).colorScheme.error,
+              behavior: SnackBarBehavior.floating,
             ),
           );
         }
@@ -123,35 +175,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  static Future<List<Task>> _loadTasksInBackground(
-    Map<String, dynamic> params,
-  ) async {
-    final isAuthenticated = params['isAuthenticated'] as bool;
-    final isOfflineMode = params['isOfflineMode'] as bool;
-    final selectedDate = DateTime.fromMillisecondsSinceEpoch(
-      params['selectedDate'],
-    );
-
-    try {
-      if (isAuthenticated && !isOfflineMode) {
-        final cloudTasks = await DatabaseService.getCloudTasks(
-          date: selectedDate,
-        );
-
-        if (cloudTasks.isNotEmpty) {
-          await Future.wait(
-            cloudTasks.map((task) => DatabaseService.insertLocalTask(task)),
-          );
-        }
-
-        return cloudTasks;
-      } else {
-        return await DatabaseService.getLocalTasks(date: selectedDate);
-      }
-    } catch (e) {
-      return await DatabaseService.getLocalTasks(date: selectedDate);
-    }
-  }
+  // Removed the complex background task loading - using direct approach now
 
   Future<void> _addTask() async {
     final result = await showDialog<Task>(
@@ -317,6 +341,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  // FIXED: Improved sync method that properly handles task reloading
   Future<void> _syncTasks() async {
     final authService = Provider.of<AuthService>(context, listen: false);
 
@@ -345,21 +370,41 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     setState(() => isLoading = true);
 
     try {
+      // Step 1: Sync local tasks to cloud
+      debugPrint('🔄 Syncing local tasks to cloud...');
       await DatabaseService.syncAllToCloud();
-      await DatabaseService.syncFromCloud();
-      await _loadTasks();
 
-      // Reschedule notifications after sync
+      // Step 2: Sync cloud tasks to local
+      debugPrint('🔄 Syncing cloud tasks to local...');
+      await DatabaseService.syncFromCloud();
+
+      // Step 3: Reload tasks from local database (this ensures UI shows all tasks)
+      debugPrint('🔄 Reloading tasks after sync...');
+      final syncedTasks = await DatabaseService.getLocalTasks(
+        date: selectedDate,
+      );
+
+      // Step 4: Update UI with synced tasks
+      if (mounted) {
+        setState(() {
+          tasks = syncedTasks;
+        });
+        debugPrint('✅ UI updated with ${syncedTasks.length} synced tasks');
+      }
+
+      // Step 5: Reschedule notifications after sync
       await NotificationService.rescheduleAllNotifications();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Row(
               children: [
-                Icon(Icons.cloud_done, color: Colors.white),
-                SizedBox(width: 8),
-                Text('Tasks synced and notifications updated'),
+                const Icon(Icons.cloud_done, color: Colors.white),
+                const SizedBox(width: 8),
+                Text(
+                  '${syncedTasks.length} tasks synced and notifications updated',
+                ),
               ],
             ),
             backgroundColor: Colors.green,
@@ -369,6 +414,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
     } catch (e) {
       debugPrint('❌ Sync failed: $e');
+
+      // On sync failure, still try to reload local tasks
+      try {
+        final localTasks = await DatabaseService.getLocalTasks(
+          date: selectedDate,
+        );
+        if (mounted) {
+          setState(() {
+            tasks = localTasks;
+          });
+        }
+      } catch (localError) {
+        debugPrint(
+          '❌ Failed to reload local tasks after sync error: $localError',
+        );
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
